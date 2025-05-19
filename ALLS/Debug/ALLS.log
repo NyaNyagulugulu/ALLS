@@ -1,0 +1,4 @@
+﻿  ALLS.cpp
+D:\项目\vs\1\ALLS\ALLS.cpp(61,14): warning C4244: “初始化”: 从“double”转换到“int”，可能丢失数据
+D:\项目\vs\1\ALLS\ALLS.cpp(62,14): warning C4244: “初始化”: 从“double”转换到“int”，可能丢失数据
+  ALLS.vcxproj -> D:\项目\vs\1\ALLS\Debug\ALLS.exe

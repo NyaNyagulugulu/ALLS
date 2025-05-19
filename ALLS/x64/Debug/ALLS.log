@@ -1,0 +1,3 @@
+﻿  ALLS.cpp
+D:\项目\vs\1\ALLS\ALLS.cpp(32,75): warning C4267: “参数”: 从“size_t”转换到“int”，可能丢失数据
+  ALLS.vcxproj -> D:\项目\vs\1\ALLS\x64\Debug\ALLS.exe
