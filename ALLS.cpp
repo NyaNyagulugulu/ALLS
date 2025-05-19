@@ -2,10 +2,12 @@
 #include <gdiplus.h>
 #include <tchar.h>
 #include <math.h>
+#include <string>
 
 #pragma comment(lib, "Gdiplus.lib")
 
 using namespace Gdiplus;
+using std::wstring;
 
 #define LOADER_DOTS 18
 #define LOADER_RADIUS 22
@@ -17,6 +19,35 @@ ULONG_PTR gdiplusToken;
 int tickCount = 0;
 Image* gLogo = nullptr;
 Image* gBackground = nullptr;
+
+// 状态切换变量
+int stepNum = 1;
+wstring statusText = L"启动中";
+DWORD lastSwitchTick = 0;
+int switchStage = 0; // 0:step1, 1:step4, 2:step10, 3:step21
+bool batLaunched = false;
+bool finishTimerStarted = false;
+DWORD finishStartTick = 0;
+
+// 查找并运行“start.bat”或“启动.bat”
+bool RunFirstBatInCurrentDir() {
+    const wchar_t* batNames[] = { L"start.bat", L"启动.bat" };
+    wchar_t exePath[MAX_PATH] = { 0 };
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    wchar_t* p = wcsrchr(exePath, L'\\');
+    if (p) *(p + 1) = 0; // 保留目录分隔符
+    for (int i = 0; i < 2; ++i) {
+        wchar_t batPath[MAX_PATH] = { 0 };
+        wcscpy_s(batPath, exePath);
+        wcscat_s(batPath, batNames[i]);
+        DWORD fa = GetFileAttributesW(batPath);
+        if (fa != INVALID_FILE_ATTRIBUTES && !(fa & FILE_ATTRIBUTE_DIRECTORY)) {
+            ShellExecuteW(NULL, L"open", batPath, NULL, NULL, SW_SHOWNORMAL);
+            return true;
+        }
+    }
+    return false;
+}
 
 void LoadImages() {
     gLogo = new Image(L"logo.png");
@@ -101,18 +132,19 @@ void Paint(HWND hwnd) {
     fmt.SetAlignment(StringAlignmentCenter);
     g.DrawString(L"ALLS HX2", -1, &font1, layout1, &fmt, &brush);
 
-    // 用 Arial 或 微软雅黑，E 不会变 F
     int stepTextY = allsTextY + 48;
-    Font font2(L"Arial", 26, FontStyleRegular); // <<<<<<<<<<<
+    Font font2(L"Arial", 26, FontStyleRegular);
+    wchar_t stepStr[32];
+    wsprintf(stepStr, L"STEP %d", stepNum);
     RectF layout2(0, (REAL)stepTextY, (REAL)winW, 36);
-    g.DrawString(L"STEP 1", -1, &font2, layout2, &fmt, &brush);
+    g.DrawString(stepStr, -1, &font2, layout2, &fmt, &brush);
 
     int loadingY = stepTextY + 50;
     Font font3(L"微软雅黑", 22, FontStyleRegular);
     StringFormat fmtLeft;
     fmtLeft.SetAlignment(StringAlignmentNear);
     RectF textBounds;
-    g.MeasureString(L"启动中", -1, &font3, PointF(0, 0), &fmtLeft, &textBounds);
+    g.MeasureString(statusText.c_str(), -1, &font3, PointF(0, 0), &fmtLeft, &textBounds);
     int textWidth = (int)ceil(textBounds.Width);
     int loaderWidth = LOADER_RADIUS * 2;
     int gap = 8;
@@ -123,9 +155,8 @@ void Paint(HWND hwnd) {
     DrawLoader(g, startX + LOADER_RADIUS, centerY, tickCount);
 
     int textBaseY = centerY - (int)ceil(textBounds.Height / 2);
-    // 字体区域高度加大，底部+8保证不被裁剪
     RectF layout3((REAL)(startX + loaderWidth + gap), (REAL)textBaseY, (REAL)textWidth + 2, textBounds.Height + 8);
-    g.DrawString(L"启动中", -1, &font3, layout3, &fmtLeft, &brush);
+    g.DrawString(statusText.c_str(), -1, &font3, layout3, &fmtLeft, &brush);
 
     BitBlt(hdc, 0, 0, winW, winH, mdc, 0, 0, SRCCOPY);
 
@@ -138,18 +169,58 @@ void Paint(HWND hwnd) {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
+        // 始终最上层
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
         SetTimer(hwnd, 1, LOADER_SPEED, NULL);
+        lastSwitchTick = GetTickCount();
         break;
-    case WM_TIMER:
+    case WM_TIMER: {
         tickCount++;
+        DWORD now = GetTickCount();
+        // 切换：3秒后step4，3秒后step10，3秒后step21
+        if (switchStage == 0 && now - lastSwitchTick > 3000) {
+            stepNum = 4;
+            statusText = L"网络设置中";
+            switchStage = 1;
+            lastSwitchTick = now;
+        }
+        else if (switchStage == 1 && now - lastSwitchTick > 3000) {
+            stepNum = 10;
+            statusText = L"请连接安装工具";
+            switchStage = 2;
+            lastSwitchTick = now;
+        }
+        else if (switchStage == 2 && now - lastSwitchTick > 3000) {
+            stepNum = 21;
+            statusText = L"游戏程序准备中";
+            switchStage = 3;
+            lastSwitchTick = now;
+            if (!batLaunched) {
+                RunFirstBatInCurrentDir();
+                batLaunched = true;
+                finishTimerStarted = false; // 确保启动时重新计时
+            }
+        }
+        // step21启动后15秒自动退出
+        if (switchStage == 3) {
+            if (!finishTimerStarted) {
+                finishStartTick = now;
+                finishTimerStarted = true;
+            }
+            else if (now - finishStartTick > 15000) {
+                PostQuitMessage(0);
+            }
+        }
         InvalidateRect(hwnd, NULL, FALSE);
         break;
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
         Paint(hwnd);
         EndPaint(hwnd, &ps);
-    } break;
+        break;
+    }
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) PostQuitMessage(0);
         break;
