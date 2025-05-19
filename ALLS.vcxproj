@@ -135,7 +135,6 @@
     <ResourceCompile Include="ALLS.rc" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="..\..\..\..\Users\Desktop\logo.png" />
     <Image Include="ALLS.ico" />
     <Image Include="small.ico" />
   </ItemGroup>
