@@ -17,10 +17,10 @@ using std::ifstream;
 using json = nlohmann::json;
 
 #define LOADER_DOTS 15
-#define LOADER_RADIUS 22
-#define LOADER_LENGTH 8
-#define LOADER_THICK 3
-#define LOADER_SPEED 90
+#define LOADER_RADIUS 15
+#define LOADER_LENGTH 4
+#define LOADER_THICK 2
+#define LOADER_SPEED 120
 
 struct Action {
     int type; // 1 = launch bat
@@ -43,6 +43,8 @@ double size_h_override = 0; // 0 for no override, 0 < size < 10 for scale over W
 bool keep_image_ratio = true;
 wstring logo_path = L"logo.png";
 wstring background_path = L"background.png";
+DWORD background_color = 0x000000;
+bool show_cursor = false;
 
 // 状态变量
 DWORD drawTickCount = 0; // tick for drawing
@@ -86,13 +88,15 @@ bool LoadConfig() {
 
     model_text = ToWString(j.value("model_text", "ALLS HX2"));
     esc_action = j.value("esc_action", 1);
+    show_cursor = j.value("show_cursor", false);
     
     if (j.contains("background") && j["background"].is_object()) {
         const auto& bg = j["background"];
         background_path = ToWString(bg.value("path", "background.png"));
-        size_w_override = bg.value("size_w_override", 0);
-        size_h_override = bg.value("size_h_override", 0);
+        size_w_override = bg.value("size_w_override", 0.0);
+        size_h_override = bg.value("size_h_override", 0.0);
         keep_image_ratio = bg.value("keep_image_ratio", true);
+        background_color = std::stoi(bg.value("color", "0x000000"), nullptr, 16);
     }
 
     if (j.contains("logo") && j["logo"].is_object()) {
@@ -137,19 +141,19 @@ void LoadImages() {
     gBackground = new Image(background_path.c_str());
 }
 
-void DrawLoader(Graphics& g, int cx, int cy, int frame) {
+void DrawLoader(Graphics& g, int cx, int cy, int frame, double ratio) {
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     for (int i = 0; i < LOADER_DOTS; ++i) {
         double angle = 2 * 3.141592653589793 * ((i + frame) % LOADER_DOTS) / LOADER_DOTS - 3.141592653589793 / 2;
         double sn = sin(angle), cs = cos(angle);
-        int x0 = cx + (int)(cs * (LOADER_RADIUS - LOADER_LENGTH));
-        int y0 = cy + (int)(sn * (LOADER_RADIUS - LOADER_LENGTH));
-        int x1 = cx + (int)(cs * LOADER_RADIUS);
-        int y1 = cy + (int)(sn * LOADER_RADIUS);
+        int x0 = cx + (int)(cs * (LOADER_RADIUS - LOADER_LENGTH)) * ratio;
+        int y0 = cy + (int)(sn * (LOADER_RADIUS - LOADER_LENGTH)) * ratio;
+        int x1 = cx + (int)(cs * LOADER_RADIUS) * ratio;
+        int y1 = cy + (int)(sn * LOADER_RADIUS) * ratio;
 
         BYTE alpha = (BYTE)(120 + 135 * (i) / (LOADER_DOTS - 1));
         Color color(alpha, 60, 60, 60);
-        Pen pen(color, LOADER_THICK);
+        Pen pen(color, LOADER_THICK * ratio);
         pen.SetStartCap(LineCapRound);
         pen.SetEndCap(LineCapRound);
         g.DrawLine(&pen, x0, y0, x1, y1);
@@ -204,7 +208,7 @@ void Paint(HWND hwnd) {
     HBITMAP mbmp = CreateCompatibleBitmap(hdc, winW, winH);
     HBITMAP oldBmp = (HBITMAP)SelectObject(mdc, mbmp);
 
-    HBRUSH bg = CreateSolidBrush(RGB(255, 255, 255));
+    HBRUSH bg = CreateSolidBrush(background_color);
     FillRect(mdc, &rc, bg);
     DeleteObject(bg);
 
@@ -232,7 +236,7 @@ void Paint(HWND hwnd) {
     int cy = bgY + bgH / 2;
 
     int y_offset = 250 * h_ratio;
-    int logo_down = -120 * h_ratio;
+    int logo_down = -220 * h_ratio;
     int logoMaxW = (int)(bgW * 0.45);
     int logoMaxH = (int)(bgH * 0.26);
 
@@ -244,7 +248,7 @@ void Paint(HWND hwnd) {
         logoDrawW = (int)(imgW * scale);
         logoDrawH = (int)(imgH * scale);
         int logoDrawX = cx - logoDrawW / 2;
-        int logoDrawY = cy - 120 + y_offset + logo_down;
+        int logoDrawY = cy + y_offset + logo_down;
         g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
         g.DrawImage(gLogo, logoDrawX, logoDrawY, logoDrawW, logoDrawH);
     }
@@ -273,15 +277,15 @@ void Paint(HWND hwnd) {
     RectF textBounds;
     g.MeasureString(statusText.c_str(), -1, &font3, PointF(0, 0), &fmtLeft, &textBounds);
     int textWidth = (int)ceil(textBounds.Width);
-    int loaderWidth = LOADER_RADIUS * 2;
-    int gap = 8;
+    int loaderWidth = LOADER_RADIUS * 2 * h_ratio;
+    int gap = 3 * h_ratio;
     int totalWidth = loaderWidth + gap + textWidth;
     int startX = cx - totalWidth / 2;
-    int centerY = loadingY + LOADER_RADIUS;
+    int centerY = loadingY + LOADER_RADIUS * h_ratio;
 
-    DrawLoader(g, startX + LOADER_RADIUS, centerY, drawTickCount);
+    DrawLoader(g, startX + LOADER_RADIUS * h_ratio, centerY, drawTickCount, h_ratio);
 
-    int textBaseY = centerY - (int)ceil(textBounds.Height / 2);
+    int textBaseY = centerY - (int)ceil(textBounds.Height / 2 - 2.4 * h_ratio);
     RectF layout3((REAL)(startX + loaderWidth + gap), (REAL)textBaseY, (REAL)textWidth + 2, textBounds.Height + 8);
     g.DrawString(statusText.c_str(), -1, &font3, layout3, &fmtLeft, &brush);
 
@@ -369,6 +373,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
     LoadConfig();
     LoadImages();
+    ShowCursor(show_cursor);
 
     const TCHAR CLASS_NAME[] = _T("ALLSLauncher");
     WNDCLASS wc = {};
