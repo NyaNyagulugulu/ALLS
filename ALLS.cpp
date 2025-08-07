@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <utility>
 #include "json.hpp"
 
 #pragma comment(lib, "Gdiplus.lib")
@@ -15,11 +16,11 @@ using std::wstring;
 using std::ifstream;
 using json = nlohmann::json;
 
-#define LOADER_DOTS 18
+#define LOADER_DOTS 15
 #define LOADER_RADIUS 22
 #define LOADER_LENGTH 8
 #define LOADER_THICK 3
-#define LOADER_SPEED 60
+#define LOADER_SPEED 90
 
 struct Action {
     int type; // 1 = launch bat
@@ -35,13 +36,20 @@ struct Stage {
 
 
 vector<Stage> stageList;
-wstring launchBat = L"start.bat";
+wstring model_text;
+int esc_action; // 0 = do not respond to ESC, 1 = exit (default), 2 = open explorer.exe for bash replaced environments
+double size_w_override = 0; // 0 for no override, 0 < size < 10 for scale over WinW, >= 10 for absolute size override
+double size_h_override = 0; // 0 for no override, 0 < size < 10 for scale over WinH, >= 10 for absolute size override 
+bool keep_image_ratio = true;
+wstring logo_path = L"logo.png";
+wstring background_path = L"background.png";
 
 // 状态变量
+DWORD drawTickCount = 0; // tick for drawing
 int currentStage = -1;
 DWORD endTick = 0; // when should current stage be end (relative).
 DWORD tickCount = 0; // relative (elapsed) tick
-DWORD tickOffset = 0; // Will be set by CREATE
+ULONGLONG tickOffset = 0; // Will be set by CREATE
 bool timerActive = true;
 
 Image* gLogo = nullptr;
@@ -49,12 +57,8 @@ Image* gBackground = nullptr;
 ULONG_PTR gdiplusToken;
 wstring statusText = L"启动中";
 int stepNum = 1;
-DWORD drawTickCount = 0; // tick for drawing
 
-// 一些其他的配置
-wstring model_text;
 
-// ------------------ 配置读取 ------------------
 std::wstring ToWString(const std::string& input) {
     if (input.empty()) return L"";
 
@@ -81,6 +85,20 @@ bool LoadConfig() {
     f.close();
 
     model_text = ToWString(j.value("model_text", "ALLS HX2"));
+    esc_action = j.value("esc_action", 1);
+    
+    if (j.contains("background") && j["background"].is_object()) {
+        const auto& bg = j["background"];
+        background_path = ToWString(bg.value("path", "background.png"));
+        size_w_override = bg.value("size_w_override", 0);
+        size_h_override = bg.value("size_h_override", 0);
+        keep_image_ratio = bg.value("keep_image_ratio", true);
+    }
+
+    if (j.contains("logo") && j["logo"].is_object()) {
+        const auto& bg = j["logo"];
+        logo_path = ToWString(bg.value("path", "logo.png"));
+    }
 
     int last_stage_end_ms = 0;
 
@@ -101,24 +119,8 @@ bool LoadConfig() {
     return true;
 }
 
-// ------------------ 维护菜单 ------------------
-void ShowMaintenanceMenu(HWND hwnd) {
-    int result = MessageBoxW(hwnd,
-        L"你已中断启动流程。\n请选择：\n\n是：启动桌面\n否：重启系统\n取消：退出程序",
-        L"ALLS 维护菜单",
-        MB_YESNOCANCEL | MB_TOPMOST | MB_ICONQUESTION);
-
-    if (result == IDYES) {
-        ShellExecuteW(NULL, L"open", L"explorer.exe", NULL, NULL, SW_SHOWNORMAL);
-    }
-    //else if (result == IDNO) {
-    //    ExitWindowsEx(EWX_REBOOT, 0);
-    //}
-    // else Cancel → 自动退出（什么都不做）
-}
-
 // ------------------ bat 启动 ------------------
-bool LaunchBatFromConfig(wstring batPath) {
+bool LaunchBat(wstring batPath) {
     if (batPath == ToWString("")) {
         return false;
     }
@@ -131,8 +133,8 @@ bool LaunchBatFromConfig(wstring batPath) {
 }
 
 void LoadImages() {
-    gLogo = new Image(L"logo.png");
-    gBackground = new Image(L"background.png");
+    gLogo = new Image(logo_path.c_str());
+    gBackground = new Image(background_path.c_str());
 }
 
 void DrawLoader(Graphics& g, int cx, int cy, int frame) {
@@ -155,6 +157,43 @@ void DrawLoader(Graphics& g, int cx, int cy, int frame) {
     g.SetSmoothingMode(SmoothingModeHighQuality);
 }
 
+std::pair<int, int> ComputeFinalSize(int bgW, int bgH, int winW, int winH)
+{
+    double newW = static_cast<double>(bgW);
+    double newH = static_cast<double>(bgH);
+
+    bool w_set = size_w_override > 0.0;
+    bool h_set = size_h_override > 0.0;
+
+    double aspect = (bgH != 0) ? static_cast<double>(bgW) / bgH : 1.0;
+
+    if (w_set) {
+        if (size_w_override < 10.0)
+            newW = winW * size_w_override;
+        else
+            newW = size_w_override;
+    }
+
+    if (h_set) {
+        if (size_h_override < 10.0)
+            newH = winH * size_h_override;
+        else
+            newH = size_h_override;
+    }
+
+    if (keep_image_ratio && (w_set ^ h_set)) {
+        if (w_set && !h_set)
+            newH = newW / aspect;
+        else if (!w_set && h_set)
+            newW = newH * aspect;
+    }
+
+    return {
+        static_cast<int>(std::round(newW)),
+        static_cast<int>(std::round(newH))
+    };
+}
+
 void Paint(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
@@ -174,20 +213,27 @@ void Paint(HWND hwnd) {
 
     // 居中绘制 background.png
     int bgW = 0, bgH = 0, bgX = 0, bgY = 0;
+    double h_ratio = 1;
     if (gBackground && gBackground->GetLastStatus() == Ok) {
         bgW = gBackground->GetWidth();
         bgH = gBackground->GetHeight();
+
+        auto res = ComputeFinalSize(bgW, bgH, winW, winH);
+        h_ratio = (double)res.second / (double)bgH;
+        bgW = res.first;
+        bgH = res.second;
         bgX = (winW - bgW) / 2;
         bgY = (winH - bgH) / 2;
+
         g.DrawImage(gBackground, bgX, bgY, bgW, bgH);
     }
 
     int cx = bgX + bgW / 2;
     int cy = bgY + bgH / 2;
 
-    int y_offset = 250;
-    int logo_down = -110;
-    int logoMaxW = (int)(bgW * 0.62);
+    int y_offset = 250 * h_ratio;
+    int logo_down = -120 * h_ratio;
+    int logoMaxW = (int)(bgW * 0.45);
     int logoMaxH = (int)(bgH * 0.26);
 
     int logoDrawW = 0, logoDrawH = 0;
@@ -204,24 +250,24 @@ void Paint(HWND hwnd) {
     }
 
     // -------- 文字与加载圈 --------
-    int allsTextY = cy - 10 + y_offset + 50;
-    FontFamily ff(L"Segoe UI");
-    Font font1(&ff, 32, FontStyleRegular);
+    int allsTextY = cy - 10 * h_ratio + y_offset + 90 * h_ratio;
+    FontFamily ff(L"Arial");
+    Font font1(&ff, 14 * h_ratio, FontStyleRegular);
     SolidBrush brush(Color(255, 0, 0, 0));
     RectF layout1(0, (REAL)allsTextY, (REAL)winW, 48);
     StringFormat fmt;
     fmt.SetAlignment(StringAlignmentCenter);
     g.DrawString(model_text.c_str(), -1, &font1, layout1, &fmt, &brush);
 
-    int stepTextY = allsTextY + 48;
-    Font font2(L"Arial", 26, FontStyleRegular);
+    int stepTextY = allsTextY + 30 * h_ratio;
+    Font font2(L"Arial", 14 * h_ratio, FontStyleRegular);
     wchar_t stepStr[32];
     wsprintf(stepStr, L"STEP %d", stepNum);
     RectF layout2(0, (REAL)stepTextY, (REAL)winW, 36);
     g.DrawString(stepStr, -1, &font2, layout2, &fmt, &brush);
 
-    int loadingY = stepTextY + 50;
-    Font font3(L"微软雅黑", 22, FontStyleRegular);
+    int loadingY = stepTextY + 30 * h_ratio;
+    Font font3(L"黑体", 14 * h_ratio, FontStyleRegular);
     StringFormat fmtLeft;
     fmtLeft.SetAlignment(StringAlignmentNear);
     RectF textBounds;
@@ -251,14 +297,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
         SetTimer(hwnd, 1, 60, NULL); // loader speed
-        tickOffset = GetTickCount();
+        tickOffset = GetTickCount64();
         break;
     case WM_TIMER: {
         if (!timerActive) {
             break;
         }
         drawTickCount++;
-        DWORD now = GetTickCount();
+        ULONGLONG now = GetTickCount64();
         tickCount = now - tickOffset;
         if (tickCount > endTick) {
             currentStage++;
@@ -270,7 +316,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // run action
                 switch (stageList[currentStage].action.type) {
                 case 1:
-                    LaunchBatFromConfig(stageList[currentStage].action.path);
+                    LaunchBat(stageList[currentStage].action.path);
                     break;
                 }
             } else {
@@ -284,9 +330,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) {
-            timerActive = false;
-            ShowMaintenanceMenu(hwnd);
-            PostQuitMessage(0);
+            
+            switch (esc_action) {
+            case 0:
+                // do nothing
+                break;
+            case 1:
+                timerActive = false;
+                PostQuitMessage(0);
+                break;
+            case 2:
+                timerActive = false;
+                ShellExecuteW(NULL, L"open", L"explorer.exe", NULL, NULL, SW_SHOWNORMAL);
+                PostQuitMessage(0);
+                break;
+            }
         }
         break;
     case WM_PAINT: {
@@ -309,10 +367,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     GdiplusStartupInput gdiplusStartupInput;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
-    LoadImages();
     LoadConfig();
+    LoadImages();
 
-    const TCHAR CLASS_NAME[] = _T("ALLSLauncherHX2");
+    const TCHAR CLASS_NAME[] = _T("ALLSLauncher");
     WNDCLASS wc = {};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
@@ -323,7 +381,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     HWND hwnd = CreateWindowEx(
-        0, CLASS_NAME, _T("ALLS HX2"),
+        0, CLASS_NAME, model_text.c_str(),
         WS_POPUP | WS_VISIBLE,
         0, 0, screenW, screenH,
         nullptr, nullptr, hInstance, nullptr

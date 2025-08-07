@@ -1,5 +1,14 @@
 {
   "model_text": "ALLS HX2",
+  "esc_action": 1,
+  "background": {
+    "path": "background.png",
+    "size_h_override": 1,
+    "keep_image_ratio": true
+  },
+  "logo": {
+    "path": "logo.png"
+  },
   "stages": [
     {
       "step": 1,
