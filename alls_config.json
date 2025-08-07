@@ -1,0 +1,29 @@
+{
+  "model_text": "ALLS HX2",
+  "stages": [
+    {
+      "step": 1,
+      "text": "启动中",
+      "delay": 1500
+    },
+    {
+      "step": 4,
+      "text": "网络设置中",
+      "delay": 3200
+    },
+    {
+      "step": 10,
+      "text": "请连接安装工具",
+      "delay": 2800
+    },
+    {
+      "step": 21,
+      "text": "游戏程序准备中",
+      "delay": 13000,
+      "action": {
+        "type": 1,
+        "path": "Start.bat"
+      }
+    }
+  ]
+}

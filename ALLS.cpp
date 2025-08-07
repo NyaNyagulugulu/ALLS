@@ -3,11 +3,17 @@
 #include <tchar.h>
 #include <math.h>
 #include <string>
+#include <vector>
+#include <fstream>
+#include "json.hpp"
 
 #pragma comment(lib, "Gdiplus.lib")
 
 using namespace Gdiplus;
+using std::vector;
 using std::wstring;
+using std::ifstream;
+using json = nlohmann::json;
 
 #define LOADER_DOTS 18
 #define LOADER_RADIUS 22
@@ -15,36 +21,111 @@ using std::wstring;
 #define LOADER_THICK 3
 #define LOADER_SPEED 60
 
-ULONG_PTR gdiplusToken;
-int tickCount = 0;
+struct Action {
+    int type; // 1 = launch bat
+    std::wstring path;
+};
+
+struct Stage {
+    int step;
+    std::wstring text;
+    int end_ms;
+    Action action; // Action upon stage start
+};
+
+
+vector<Stage> stageList;
+wstring launchBat = L"start.bat";
+
+// 状态变量
+int currentStage = -1;
+DWORD endTick = 0; // when should current stage be end (relative).
+DWORD tickCount = 0; // relative (elapsed) tick
+DWORD tickOffset = 0; // Will be set by CREATE
+bool timerActive = true;
+
 Image* gLogo = nullptr;
 Image* gBackground = nullptr;
-
-// 状态切换变量
-int stepNum = 1;
+ULONG_PTR gdiplusToken;
 wstring statusText = L"启动中";
-DWORD lastSwitchTick = 0;
-int switchStage = 0; // 0:step1, 1:step4, 2:step10, 3:step21
-bool batLaunched = false;
-bool finishTimerStarted = false;
-DWORD finishStartTick = 0;
+int stepNum = 1;
+DWORD drawTickCount = 0; // tick for drawing
 
-// 查找并运行“start.bat”或“启动.bat”
-bool RunFirstBatInCurrentDir() {
-    const wchar_t* batNames[] = { L"start.bat", L"启动.bat" };
-    wchar_t exePath[MAX_PATH] = { 0 };
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    wchar_t* p = wcsrchr(exePath, L'\\');
-    if (p) *(p + 1) = 0; // 保留目录分隔符
-    for (int i = 0; i < 2; ++i) {
-        wchar_t batPath[MAX_PATH] = { 0 };
-        wcscpy_s(batPath, exePath);
-        wcscat_s(batPath, batNames[i]);
-        DWORD fa = GetFileAttributesW(batPath);
-        if (fa != INVALID_FILE_ATTRIBUTES && !(fa & FILE_ATTRIBUTE_DIRECTORY)) {
-            ShellExecuteW(NULL, L"open", batPath, NULL, NULL, SW_SHOWNORMAL);
-            return true;
+// 一些其他的配置
+wstring model_text;
+
+// ------------------ 配置读取 ------------------
+std::wstring ToWString(const std::string& input) {
+    if (input.empty()) return L"";
+
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, input.c_str(), (int)input.length(), NULL, 0);
+    std::wstring result(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, input.c_str(), (int)input.length(), &result[0], size_needed);
+    return result;
+}
+
+
+bool LoadConfig() {
+    std::wstring configPathW = L"alls_config.json";
+
+    // 转换为 std::string（UTF-8），以便 std::ifstream 使用
+    int len = WideCharToMultiByte(CP_UTF8, 0, configPathW.c_str(), -1, NULL, 0, NULL, NULL);
+    std::string configPath(len, 0);
+    WideCharToMultiByte(CP_UTF8, 0, configPathW.c_str(), -1, &configPath[0], len, NULL, NULL);
+
+    std::ifstream f(configPath);
+    if (!f.is_open()) return false;
+
+    json j;
+    f >> j;
+    f.close();
+
+    model_text = ToWString(j.value("model_text", "ALLS HX2"));
+
+    int last_stage_end_ms = 0;
+
+    for (const auto& st : j["stages"]) {
+        Stage s;
+        s.step = st.value("step", 0);
+        s.text = ToWString(st.value("text", ""));
+        s.end_ms = last_stage_end_ms + st.value("delay", 3000);
+        last_stage_end_ms = s.end_ms;
+        if (st.contains("action") && st["action"].is_object()) {
+            const auto& action = st["action"];
+            s.action.type = action.value("type", 0);
+            s.action.path = ToWString(action.value("path", ""));
         }
+        stageList.push_back(s);
+    }
+
+    return true;
+}
+
+// ------------------ 维护菜单 ------------------
+void ShowMaintenanceMenu(HWND hwnd) {
+    int result = MessageBoxW(hwnd,
+        L"你已中断启动流程。\n请选择：\n\n是：启动桌面\n否：重启系统\n取消：退出程序",
+        L"ALLS 维护菜单",
+        MB_YESNOCANCEL | MB_TOPMOST | MB_ICONQUESTION);
+
+    if (result == IDYES) {
+        ShellExecuteW(NULL, L"open", L"explorer.exe", NULL, NULL, SW_SHOWNORMAL);
+    }
+    //else if (result == IDNO) {
+    //    ExitWindowsEx(EWX_REBOOT, 0);
+    //}
+    // else Cancel → 自动退出（什么都不做）
+}
+
+// ------------------ bat 启动 ------------------
+bool LaunchBatFromConfig(wstring batPath) {
+    if (batPath == ToWString("")) {
+        return false;
+    }
+    DWORD fa = GetFileAttributesW(batPath.c_str());
+    if (fa != INVALID_FILE_ATTRIBUTES && !(fa & FILE_ATTRIBUTE_DIRECTORY)) {
+        ShellExecuteW(NULL, L"open", batPath.c_str(), NULL, NULL, SW_SHOWNORMAL);
+        return true;
     }
     return false;
 }
@@ -130,7 +211,7 @@ void Paint(HWND hwnd) {
     RectF layout1(0, (REAL)allsTextY, (REAL)winW, 48);
     StringFormat fmt;
     fmt.SetAlignment(StringAlignmentCenter);
-    g.DrawString(L"ALLS HX2", -1, &font1, layout1, &fmt, &brush);
+    g.DrawString(model_text.c_str(), -1, &font1, layout1, &fmt, &brush);
 
     int stepTextY = allsTextY + 48;
     Font font2(L"Arial", 26, FontStyleRegular);
@@ -152,7 +233,7 @@ void Paint(HWND hwnd) {
     int startX = cx - totalWidth / 2;
     int centerY = loadingY + LOADER_RADIUS;
 
-    DrawLoader(g, startX + LOADER_RADIUS, centerY, tickCount);
+    DrawLoader(g, startX + LOADER_RADIUS, centerY, drawTickCount);
 
     int textBaseY = centerY - (int)ceil(textBounds.Height / 2);
     RectF layout3((REAL)(startX + loaderWidth + gap), (REAL)textBaseY, (REAL)textWidth + 2, textBounds.Height + 8);
@@ -169,51 +250,45 @@ void Paint(HWND hwnd) {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
-        // 始终最上层
-        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-        SetTimer(hwnd, 1, LOADER_SPEED, NULL);
-        lastSwitchTick = GetTickCount();
+        SetTimer(hwnd, 1, 60, NULL); // loader speed
+        tickOffset = GetTickCount();
         break;
     case WM_TIMER: {
-        tickCount++;
+        if (!timerActive) {
+            break;
+        }
+        drawTickCount++;
         DWORD now = GetTickCount();
-        // 切换：3秒后step4，3秒后step10，3秒后step21
-        if (switchStage == 0 && now - lastSwitchTick > 3000) {
-            stepNum = 4;
-            statusText = L"网络设置中";
-            switchStage = 1;
-            lastSwitchTick = now;
-        }
-        else if (switchStage == 1 && now - lastSwitchTick > 3000) {
-            stepNum = 10;
-            statusText = L"请连接安装工具";
-            switchStage = 2;
-            lastSwitchTick = now;
-        }
-        else if (switchStage == 2 && now - lastSwitchTick > 3000) {
-            stepNum = 21;
-            statusText = L"游戏程序准备中";
-            switchStage = 3;
-            lastSwitchTick = now;
-            if (!batLaunched) {
-                RunFirstBatInCurrentDir();
-                batLaunched = true;
-                finishTimerStarted = false; // 确保启动时重新计时
-            }
-        }
-        // step21启动后15秒自动退出
-        if (switchStage == 3) {
-            if (!finishTimerStarted) {
-                finishStartTick = now;
-                finishTimerStarted = true;
-            }
-            else if (now - finishStartTick > 15000) {
+        tickCount = now - tickOffset;
+        if (tickCount > endTick) {
+            currentStage++;
+            if (currentStage < (int)stageList.size()) {
+                stepNum = stageList[currentStage].step;
+                statusText = stageList[currentStage].text;
+                endTick = (DWORD)stageList[currentStage].end_ms;
+
+                // run action
+                switch (stageList[currentStage].action.type) {
+                case 1:
+                    LaunchBatFromConfig(stageList[currentStage].action.path);
+                    break;
+                }
+            } else {
+                timerActive = false;
                 PostQuitMessage(0);
             }
         }
+
         InvalidateRect(hwnd, NULL, FALSE);
         break;
     }
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) {
+            timerActive = false;
+            ShowMaintenanceMenu(hwnd);
+            PostQuitMessage(0);
+        }
+        break;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
@@ -221,9 +296,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         EndPaint(hwnd, &ps);
         break;
     }
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) PostQuitMessage(0);
-        break;
     case WM_DESTROY:
         KillTimer(hwnd, 1);
         PostQuitMessage(0);
@@ -237,8 +309,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     GdiplusStartupInput gdiplusStartupInput;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
-
     LoadImages();
+    LoadConfig();
 
     const TCHAR CLASS_NAME[] = _T("ALLSLauncherHX2");
     WNDCLASS wc = {};
@@ -248,7 +320,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     wc.lpszClassName = CLASS_NAME;
     RegisterClass(&wc);
 
-    // 全屏无边框
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     HWND hwnd = CreateWindowEx(
