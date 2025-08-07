@@ -53,7 +53,6 @@
 - STEP 10 请连接安装工具
 - STEP 21 游戏程序准备中
 
-
 在显示 `STEP 21` 时，程序会执行你配置好的启动脚本。
 
 ### 3️⃣ 自动退出
@@ -121,6 +120,18 @@
   ]
 }
 ```
+
+## 🧸 命令行启动
+
+您也可以通过命令行启动 ALLS.exe，这在您想配置 winlogon 时尤其有用。
+
+> 注意：Winlogon 配置的默认工作目录为 `C:\Windows\System32`。如果您想通过 Winlogon 指定启动 ALLS.exe，则需要在启动时指定好配置文件路径，例如：
+>
+> ```cmd
+> D:\ALLS\ALLS.exe --config D:\ALLS\alls_config.json
+> ```
+>
+> 否则 ALLS.exe 由于读取不到正确的配置文件和资源文件，将会闪退。
 
 ## 🌟 关于
 

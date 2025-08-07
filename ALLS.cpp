@@ -6,6 +6,7 @@
 #include <vector>
 #include <fstream>
 #include <utility>
+#include <iostream>
 #include "json.hpp"
 
 #pragma comment(lib, "Gdiplus.lib")
@@ -34,6 +35,8 @@ struct Stage {
     Action action; // Action upon stage start
 };
 
+wstring configPathW = L"alls_config.json";
+bool debugMode = false;
 
 vector<Stage> stageList;
 wstring model_text;
@@ -72,15 +75,16 @@ std::wstring ToWString(const std::string& input) {
 
 
 bool LoadConfig() {
-    std::wstring configPathW = L"alls_config.json";
-
     // 转换为 std::string（UTF-8），以便 std::ifstream 使用
     int len = WideCharToMultiByte(CP_UTF8, 0, configPathW.c_str(), -1, NULL, 0, NULL, NULL);
     std::string configPath(len, 0);
     WideCharToMultiByte(CP_UTF8, 0, configPathW.c_str(), -1, &configPath[0], len, NULL, NULL);
 
     std::ifstream f(configPath);
-    if (!f.is_open()) return false;
+    if (!f.is_open()) {
+        std::cout << "Failed to load config file from path '" << configPath.c_str() <<  "'" << std::endl;
+        exit(1);
+    }
 
     json j;
     f >> j;
@@ -370,7 +374,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 
-int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+void InitConsole() {
+    AllocConsole();
+    FILE* fp;
+    freopen_s(&fp, "CONOUT$", "w", stdout);
+    freopen_s(&fp, "CONOUT$", "w", stderr);
+    std::ios::sync_with_stdio(); // optional
+}
+
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow) {
+    // 简单命令行参数解析
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    for (int i = 1; i < argc - 1; ++i) {
+        if (wcscmp(argv[i], L"--config") == 0) {
+            configPathW = argv[i + 1];
+            break;
+        }
+    }
+    for (int i = 1; i < argc - 1; ++i) {
+        if (wcscmp(argv[i], L"--debug") == 0) {
+            debugMode = true;
+            break;
+        }
+    }
+    LocalFree(argv);
+
+    if (debugMode) {
+        InitConsole();
+        std::cout << "Debug console started" << std::endl;
+    }
+
     GdiplusStartupInput gdiplusStartupInput;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
     LoadConfig();
