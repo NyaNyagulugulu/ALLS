@@ -33,7 +33,7 @@
       "delay": 13000,
       "action": {
         "type": 1,
-        "path": "Start.bat"
+        "path": "start.bat"
       }
     }
   ]
