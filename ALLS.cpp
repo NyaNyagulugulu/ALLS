@@ -8,6 +8,9 @@
 #include <utility>
 #include <iostream>
 #include "json.hpp"
+#include <tlhelp32.h>
+#include <exception>
+#include <sstream>
 
 #pragma comment(lib, "Gdiplus.lib")
 
@@ -23,6 +26,24 @@ using json = nlohmann::json;
 #define LOADER_THICK 2
 #define LOADER_SPEED 120
 
+void WriteCrashLog(const std::string& message) {
+    std::ofstream log("ALLS_crash.log", std::ios::app);
+    if (!log) return;
+
+    // 时间戳
+    time_t now = time(0);
+    tm tstruct;
+
+    // 安全地获取本地时间（thread-safe）
+    localtime_s(&tstruct, &now);
+
+    // 格式化输出时间
+    char buf[64];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tstruct);  // 可自定义格式
+    log << "=== Crash at " << buf << "===\n";
+    log << message << "\n\n";
+}
+
 struct Action {
     int type; // 1 = launch bat
     std::wstring path;
@@ -32,6 +53,8 @@ struct Stage {
     int step;
     std::wstring text;
     int end_ms;
+    std::wstring wait_process; // 非空表示此阶段等待进程启动
+    std::wstring wait_window_title; // 非空表示此阶段等待某个特定标题的窗口出现
     Action action; // Action upon stage start
 };
 
@@ -48,6 +71,7 @@ wstring logo_path = L"logo.png";
 wstring background_path = L"background.png";
 DWORD background_color = 0x000000;
 bool show_cursor = false;
+bool always_on_top = false;
 
 // 状态变量
 DWORD drawTickCount = 0; // tick for drawing
@@ -56,6 +80,9 @@ DWORD endTick = 0; // when should current stage be end (relative).
 DWORD tickCount = 0; // relative (elapsed) tick
 ULONGLONG tickOffset = 0; // Will be set by CREATE
 bool timerActive = true;
+wstring target_process = L"";
+wstring target_window_title = L"";
+bool was_waiting_for_process = false;
 
 Image* gLogo = nullptr;
 Image* gBackground = nullptr;
@@ -82,6 +109,7 @@ bool LoadConfig() {
 
     std::ifstream f(configPath);
     if (!f.is_open()) {
+        WriteCrashLog("Failed to load config file from path '" + configPath + "'");
         std::cout << "Failed to load config file from path '" << configPath.c_str() <<  "'" << std::endl;
         exit(1);
     }
@@ -93,6 +121,7 @@ bool LoadConfig() {
     model_text = ToWString(j.value("model_text", "ALLS HX2"));
     esc_action = j.value("esc_action", 1);
     show_cursor = j.value("show_cursor", false);
+    always_on_top = j.value("always_on_top", false);
     
     if (j.contains("background") && j["background"].is_object()) {
         const auto& bg = j["background"];
@@ -116,6 +145,8 @@ bool LoadConfig() {
         s.text = ToWString(st.value("text", ""));
         s.end_ms = last_stage_end_ms + st.value("delay", 3000);
         last_stage_end_ms = s.end_ms;
+        s.wait_process = ToWString(st.value("wait_process", ""));
+        s.wait_window_title = ToWString(st.value("wait_window_title", ""));
         if (st.contains("action") && st["action"].is_object()) {
             const auto& action = st["action"];
             s.action.type = action.value("type", 0);
@@ -301,11 +332,35 @@ void Paint(HWND hwnd) {
     ReleaseDC(hwnd, hdc);
 }
 
+bool IsProcessRunning(const std::wstring& processName) {
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return false;
+
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    if (Process32FirstW(hSnapshot, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, processName.c_str()) == 0) {
+                CloseHandle(hSnapshot);
+                return true;
+            }
+        } while (Process32NextW(hSnapshot, &pe));
+    }
+    CloseHandle(hSnapshot);
+    return false;
+}
+
+bool IsWindowWithTitleVisible(const std::wstring& title) {
+    HWND hwnd = FindWindowW(NULL, title.c_str());
+    return hwnd != NULL && IsWindowVisible(hwnd);;
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
-        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        if (always_on_top) {
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
         SetTimer(hwnd, 1, 60, NULL); // loader speed
         tickOffset = GetTickCount64();
         break;
@@ -315,25 +370,46 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         drawTickCount++;
         ULONGLONG now = GetTickCount64();
-        tickCount = now - tickOffset;
-        if (tickCount > endTick) {
-            currentStage++;
-            if (currentStage < (int)stageList.size()) {
-                stepNum = stageList[currentStage].step;
-                statusText = stageList[currentStage].text;
-                endTick = (DWORD)stageList[currentStage].end_ms;
-
-                // run action
-                switch (stageList[currentStage].action.type) {
-                case 1:
-                    LaunchBat(stageList[currentStage].action.path);
-                    break;
-                }
-            } else {
-                timerActive = false;
-                PostQuitMessage(0);
+        if (target_process != L"") {
+            was_waiting_for_process = true;
+            if (IsProcessRunning(target_process)) {
+                target_process = L"";
             }
         }
+        else if (target_window_title != L"") {
+            was_waiting_for_process = true;
+            if (IsWindowWithTitleVisible(target_window_title)) {
+                target_window_title = L"";
+            }
+        } 
+        else {
+            if (was_waiting_for_process) {
+                tickOffset += now - (tickOffset + tickCount); // 等待 process/window 期间的时间视为“静止”，因此要补偿给 offset
+                was_waiting_for_process = false;
+            }
+            tickCount = now - tickOffset;
+            if (tickCount > endTick) {
+                currentStage++;
+                if (currentStage < (int)stageList.size()) {
+                    stepNum = stageList[currentStage].step;
+                    statusText = stageList[currentStage].text;
+                    endTick = (DWORD)stageList[currentStage].end_ms;
+                    target_process = stageList[currentStage].wait_process;
+                    target_window_title = stageList[currentStage].wait_window_title;
+
+                    // run action
+                    switch (stageList[currentStage].action.type) {
+                    case 1:
+                        LaunchBat(stageList[currentStage].action.path);
+                        break;
+                    }
+                } else {
+                    timerActive = false;
+                    PostQuitMessage(0);
+                }
+            }
+        }
+        
 
         InvalidateRect(hwnd, NULL, FALSE);
         break;
@@ -382,7 +458,20 @@ void InitConsole() {
     std::ios::sync_with_stdio(); // optional
 }
 
-int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow) {
+LONG WINAPI WindowsCrashHandler(EXCEPTION_POINTERS* ExceptionInfo) {
+    std::ostringstream oss;
+    oss << "Windows Exception Code: 0x" << std::hex << ExceptionInfo->ExceptionRecord->ExceptionCode;
+    oss << "\nAddress: 0x" << std::hex << reinterpret_cast<uintptr_t>(ExceptionInfo->ExceptionRecord->ExceptionAddress);
+    WriteCrashLog(oss.str());
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void TerminateHandler() {
+    WriteCrashLog("Unhandled C++ exception (std::terminate triggered)");
+    std::abort(); // 强制终止
+}
+
+int RunALLS(HINSTANCE hInstance, LPSTR lpCmdLine, int nCmdShow) {
     // 简单命令行参数解析
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -405,9 +494,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdSh
         std::cout << "Debug console started" << std::endl;
     }
 
+    LoadConfig();
     GdiplusStartupInput gdiplusStartupInput;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
-    LoadConfig();
     LoadImages();
     ShowCursor(show_cursor);
 
@@ -442,4 +531,23 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdSh
     if (gBackground) delete gBackground;
     GdiplusShutdown(gdiplusToken);
     return 0;
+}
+
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow) {
+    // 注册异常处理器
+    std::set_terminate(TerminateHandler);
+    SetUnhandledExceptionFilter(WindowsCrashHandler);
+
+    try {
+        // 原始 WinMain 内容
+        return RunALLS(hInstance, lpCmdLine, nCmdShow);
+    }
+    catch (const std::exception& e) {
+        WriteCrashLog(std::string("Caught std::exception: ") + e.what());
+    }
+    catch (...) {
+        WriteCrashLog("Caught unknown exception");
+    }
+
+    return -1;
 }

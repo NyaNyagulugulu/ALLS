@@ -82,6 +82,7 @@
   "model_text": "ALLS HX2",     // 显示在主界面的基板型号
   "esc_action": 1,              // 按下 ESC 后的行为。0 为什么也不做，1 是退出该程序，2 是退出该程序并启动 explorer.exe
   "show_cursor": false,         // 是否在该启动界面中显示鼠标
+  "always_on_top": true,        // 是否让该启动界面始终保持在桌面最上层
   "background": {               // 有关背景的设置
     "path": "background.png",   // 背景图片的路径
     "size_h_override": 1,       // 背景图高度设置。override 为 0 时，不修改尺寸。当 override 大于 0 小于 10 时，将 bg 对应维度尺寸调整为 win 对应维度的倍数。当 override 大于等于 10 时，我们认为输入是绝对尺寸，直接用这个数值替换 bg 的对应维度
@@ -111,7 +112,9 @@
     {
       "step": 21,
       "text": "游戏程序准备中",
-      "delay": 13000,
+      "wait_process": "Sinmai.exe",     // 等待指定进程启动
+      "wait_window_title": "Sinmai",    // 等待指定标题的窗口出现
+      "delay": 10000,           // 等待完上述两项以后，再停留多长时间
       "action": {               // 可以配置在该阶段开始时，要做哪些事情，例如启动指定的脚本
         "type": 1,              // action 类型，0 为什么也不做，1 为启动指定路径的脚本或程序
         "path": "start.bat"     // 当 type 为 1 时必须填写，脚本或程序的路径

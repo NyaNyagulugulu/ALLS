@@ -2,6 +2,7 @@
   "model_text": "ALLS HX2",
   "esc_action": 1,
   "show_cursor": false,
+  "always_on_top": true,
   "background": {
     "path": "background.png",
     "size_h_override": 1,
@@ -30,7 +31,9 @@
     {
       "step": 21,
       "text": "游戏程序准备中",
-      "delay": 13000,
+      "wait_process": "Sinmai.exe",
+      "wait_window_title": "Sinmai",
+      "delay": 10000,
       "action": {
         "type": 1,
         "path": "start.bat"
