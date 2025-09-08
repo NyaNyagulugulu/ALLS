@@ -1,0 +1,43 @@
+{
+  "model_text": "ALLS HX2",
+  "esc_action": 1,
+  "show_cursor": false,
+  "always_on_top": true,
+  "background": {
+    "path": "background.png",
+    "size_h_override": 1,
+    "keep_image_ratio": true,
+    "color": "0x000000"
+  },
+  "logo": {
+    "path": "logo.png"
+  },
+  "stages": [
+    {
+      "step": 1,
+      "text": "启动中",
+      "delay": 1500
+    },
+    {
+      "step": 4,
+      "text": "网络设置中",
+      "delay": 3200
+    },
+    {
+      "step": 10,
+      "text": "请连接安装工具",
+      "delay": 2800
+    },
+    {
+      "step": 21,
+      "text": "游戏程序准备中",
+      "wait_process": "Sinmai.exe",
+      "wait_window_title": "Sinmai",
+      "delay": 10000,
+      "action": {
+        "type": 1,
+        "path": "start.bat"
+      }
+    }
+  ]
+}
